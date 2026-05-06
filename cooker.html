@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhistleMaster Pro</title>
+    <style>
+        :root {
+            --primary: #ff4757;
+            --secondary: #2ed573;
+            --bg: #1e272e;
+            --card: #2f3542;
+            --text: #ffffff;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        .container {
+            width: 90%;
+            max-width: 400px;
+            background: var(--card);
+            padding: 2rem;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            text-align: center;
+        }
+
+        .stats { display: flex; justify-content: space-between; margin-bottom: 1rem; opacity: 0.8; }
+
+        .display {
+            font-size: 6rem;
+            font-weight: bold;
+            color: var(--primary);
+            margin: 10px 0;
+            transition: all 0.2s;
+        }
+
+        canvas {
+            width: 100%;
+            height: 60px;
+            background: #000;
+            border-radius: 10px;
+            margin: 15px 0;
+        }
+
+        .controls { margin-top: 20px; }
+
+        button {
+            width: 100%;
+            padding: 15px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+
+        #startBtn { background-color: var(--secondary); color: white; }
+        #startBtn:active { transform: scale(0.98); }
+        #startBtn:disabled { background-color: #747d8c; }
+
+        .settings {
+            margin-top: 20px;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        input[type=range] { width: 100%; margin: 10px 0; }
+
+        .log {
+            margin-top: 15px;
+            max-height: 80px;
+            overflow-y: auto;
+            font-size: 0.8rem;
+            color: #a4b0be;
+            text-align: left;
+            border-top: 1px solid #57606f;
+            padding-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="stats">
+            <span id="timer">Time: 00:00</span>
+            <span id="status">Ready</span>
+        </div>
+
+        <div class="display" id="count">0</div>
+        <p style="margin: 0; letter-spacing: 2px;">WHISTLES</p>
+
+        <canvas id="visualizer"></canvas>
+
+        <div class="settings">
+            <label>Sensitivity (Threshold)</label>
+            <input type="range" id="threshold" min="30" max="150" value="70">
+            <label>Target Whistles: <span id="targetVal">3</span></label>
+            <input type="range" id="target" min="1" max="15" value="3">
+        </div>
+
+        <div class="controls">
+            <button id="startBtn">START MONITORING</button>
+        </div>
+
+        <div class="log" id="log">Logs: App initialized...</div>
+    </div>
+
+    <script>
+        let whistleCount = 0;
+        let isWhistling = false;
+        let startTime, audioContext, analyser, dataArray, wakeLock = null;
+        
+        // Detection Config
+        let lastWhistleTime = 0;
+        const COOLDOWN = 8000; // 8 seconds between whistles
+        const MIN_DURATION = 1200; // 1.2 seconds of sustained sound
+        let whistleStartTimestamp = 0;
+
+        const startBtn = document.getElementById('startBtn');
+        const countDisplay = document.getElementById('count');
+        const timerDisplay = document.getElementById('timer');
+        const statusDisplay = document.getElementById('status');
+        const thresholdInput = document.getElementById('threshold');
+        const targetInput = document.getElementById('target');
+        const logDisplay = document.getElementById('log');
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+
+        targetInput.oninput = () => document.getElementById('targetVal').innerText = targetInput.value;
+
+        startBtn.onclick = async () => {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 1024;
+                source.connect(analyser);
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                startTime = Date.now();
+                startBtn.disabled = true;
+                startBtn.innerText = "LISTENING...";
+                statusDisplay.innerText = "Live";
+                
+                // Request Wake Lock
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                }
+
+                addLog("Monitoring started");
+                drawVisualizer();
+                detectLoop();
+                updateTimer();
+            } catch (err) {
+                addLog("Error: " + err.message);
+            }
+        };
+
+        function detectLoop() {
+            analyser.getByteFrequencyData(dataArray);
+            
+            // Focus on high pitch (Whistles usually hit 2kHz - 4kHz)
+            let highFreqSum = 0;
+            for (let i = 100; i < 250; i++) { highFreqSum += dataArray[i]; }
+            let avg = highFreqSum / 150;
+
+            const now = Date.now();
+            const threshold = parseInt(thresholdInput.value);
+
+            if (avg > threshold && (now - lastWhistleTime > COOLDOWN)) {
+                if (!isWhistling) {
+                    isWhistling = true;
+                    whistleStartTimestamp = now;
+                } else if (now - whistleStartTimestamp > MIN_DURATION) {
+                    triggerWhistle();
+                }
+            } else {
+                isWhistling = false;
+            }
+
+            requestAnimationFrame(detectLoop);
+        }
+
+        function triggerWhistle() {
+            whistleCount++;
+            lastWhistleTime = Date.now();
+            isWhistling = false;
+
+            countDisplay.innerText = whistleCount;
+            countDisplay.style.color = "#2ed573";
+            addLog(`Whistle #${whistleCount} detected`);
+            
+            if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+
+            if (whistleCount >= parseInt(targetInput.value)) {
+                alertUser();
+            }
+
+            setTimeout(() => { countDisplay.style.color = "#ff4757"; }, 2000);
+        }
+
+        function alertUser() {
+            statusDisplay.innerText = "DONE!";
+            statusDisplay.style.color = "#ff4757";
+            addLog("TARGET REACHED!");
+            // Play emergency tone
+            const osc = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            osc.connect(gain);
+            gain.connect(audioContext.destination);
+            osc.type = 'sine';
+            osc.frequency.value = 880;
+            osc.start();
+            setTimeout(() => osc.stop(), 3000);
+        }
+
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+            if (!analyser) return;
+            analyser.getByteTimeDomainData(dataArray);
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#2ed573';
+            ctx.beginPath();
+            let sliceWidth = canvas.width / analyser.frequencyBinCount;
+            let x = 0;
+            for (let i = 0; i < analyser.frequencyBinCount; i++) {
+                let v = dataArray[i] / 128.0;
+                let y = v * canvas.height / 2;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                x += sliceWidth;
+            }
+            ctx.lineTo(canvas.width, canvas.height / 2);
+            ctx.stroke();
+        }
+
+        function updateTimer() {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            const s = String(elapsed % 60).padStart(2, '0');
+            timerDisplay.innerText = `Time: ${m}:${s}`;
+            setTimeout(updateTimer, 1000);
+        }
+
+        function addLog(msg) {
+            const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            logDisplay.innerHTML = `[${time}] ${msg}<br>` + logDisplay.innerHTML;
+        }
+    </script>
+</body>
+</html>
